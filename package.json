@@ -1,0 +1,54 @@
+{
+  "name": "payload-comgate-adapter",
+  "version": "0.1.1",
+  "description": "Comgate payment gateway adapter for PayloadCMS ecommerce plugin",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.mjs",
+      "require": "./dist/client.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "payload",
+    "payloadcms",
+    "ecommerce",
+    "payment",
+    "comgate"
+  ],
+  "author": "blaze IT s.r.o. <info@blazeit.sk>",
+  "license": "MIT",
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/blazeITHugo/payload-comgate-adapter.git"
+  },
+  "bugs": {
+    "url": "https://github.com/blazeITHugo/payload-comgate-adapter/issues"
+  },
+  "homepage": "https://github.com/blazeITHugo/payload-comgate-adapter#readme",
+  "peerDependencies": {
+    "@payloadcms/plugin-ecommerce": "^3.60.0",
+    "payload": "^3.0.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.1",
+    "typescript": "^5.7.0"
+  }
+}
