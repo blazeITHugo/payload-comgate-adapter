@@ -65,8 +65,11 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
 
     // Validate required data
     const currency = data.currency
-    const cart = data.cart as { id: string | number; subtotal: number; items: unknown[] } | undefined
-    const customerEmail = data.customerEmail || (req.user?.collection === 'users' ? req.user.email : undefined)
+    const cart = data.cart as
+      | { id: string | number; subtotal: number; items: unknown[] }
+      | undefined
+    const customerEmail =
+      data.customerEmail || (req.user?.collection === 'users' ? req.user.email : undefined)
 
     if (!currency) {
       throw new PaymentError('Currency is required.')
@@ -81,38 +84,71 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
     }
 
     // Calculate total (additionalData can include discount, shipping, etc.)
-    // IMPORTANT: cart.subtotal is in CENTS (from ecommerce plugin)
-    // discount.calculatedAmount is in CENTS
-    // shippingMethod.cost is in EUR (converted from cents in SummaryStepClient)
+    // All monetary values from additionalData are in the ORDER'S CURRENCY (not always EUR)
     const additionalData = data as Record<string, unknown>
-    const discount = additionalData.discount as { calculatedAmount?: number } | undefined
-    const shippingMethod = additionalData.shippingMethod as { cost?: number } | undefined
+    const discount = additionalData.discount as
+      | { calculatedAmount?: number; [key: string]: unknown }
+      | undefined
+    const shippingMethod = additionalData.shippingMethod as
+      | { cost?: number; [key: string]: unknown }
+      | undefined
+    const pricingData = additionalData.pricing as
+      | {
+          subtotal?: number
+          discountAmount?: number
+          shippingCost?: number
+          grandTotal?: number
+          freeShipping?: boolean
+        }
+      | undefined
 
+    // Use explicit pricing data if provided (preferred), otherwise calculate from cart
     const subtotalCents = cart.subtotal // CENTS from ecommerce plugin
     const discountCents = discount?.calculatedAmount || 0 // CENTS
-    const shippingCents = Math.round((shippingMethod?.cost || 0) * 100) // EUR → CENTS
+    const shippingCostValue = pricingData?.shippingCost ?? shippingMethod?.cost ?? 0
+    const shippingCents = Math.round(shippingCostValue * 100)
 
     const cartTotalCents = Math.max(0, subtotalCents - discountCents) + shippingCents
-    const cartTotalEUR = cartTotalCents / 100 // For transaction record (EUR)
+    const cartTotal = cartTotalCents / 100
+
+    // Pricing breakdown in order currency
+    const subtotalInCurrency = subtotalCents / 100
+    const discountInCurrency = discountCents / 100
+    const grandTotalInCurrency = pricingData?.grandTotal ?? cartTotal
 
     let transaction: { id: string | number } | undefined
 
     try {
-      // Create transaction record
+      // Create transaction record with complete pricing breakdown
       transaction = await payload.create({
         collection: transactionsSlug as 'transactions',
         data: {
           paymentMethod: 'comgate' as const,
           status: 'pending' as const,
-          amount: cartTotalEUR, // Store in EUR
+          amount: grandTotalInCurrency,
           currency: currency.toUpperCase() as 'EUR' | 'CZK',
           cart: typeof cart.id === 'number' ? cart.id : undefined,
-          customerEmail, // Save for order creation
-          // Store additional data for order creation
+          customerEmail,
+          // Pricing breakdown
+          subtotal: subtotalInCurrency,
+          subtotalBeforeDiscount: subtotalInCurrency,
+          discountAmount: discountInCurrency,
+          shippingCost: shippingCostValue,
+          grandTotal: grandTotalInCurrency,
+          freeShipping: pricingData?.freeShipping ?? shippingCostValue === 0,
+          // Discount details
           ...(additionalData.discount ? { discount: additionalData.discount } : {}),
-          ...(additionalData.shippingMethod ? { shippingMethod: additionalData.shippingMethod } : {}),
-          ...(additionalData.shippingAddress ? { shippingAddress: additionalData.shippingAddress } : {}),
-          ...(discountCents > 0 ? { subtotalBeforeDiscount: subtotalCents / 100 } : {}),
+          // Shipping method details
+          ...(additionalData.shippingMethod
+            ? { shippingMethod: additionalData.shippingMethod }
+            : {}),
+          // Addresses
+          ...(additionalData.shippingAddress
+            ? { shippingAddress: additionalData.shippingAddress }
+            : {}),
+          ...(additionalData.billingAddress
+            ? { billingAddress: additionalData.billingAddress }
+            : {}),
         },
       })
 
@@ -169,11 +205,13 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
 
       // Mark transaction as failed
       if (transaction?.id) {
-        await payload.update({
-          collection: transactionsSlug as 'transactions',
-          id: transaction.id,
-          data: { status: 'failed' as const },
-        }).catch(e => payload.logger.error(e, 'Failed to update transaction status'))
+        await payload
+          .update({
+            collection: transactionsSlug as 'transactions',
+            id: transaction.id,
+            data: { status: 'failed' as const },
+          })
+          .catch((e) => payload.logger.error(e, 'Failed to update transaction status'))
       }
 
       if (error instanceof PaymentError) {
@@ -181,7 +219,7 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
       }
 
       throw new PaymentError(
-        error instanceof Error ? error.message : 'Unknown error initiating payment'
+        error instanceof Error ? error.message : 'Unknown error initiating payment',
       )
     }
   }
@@ -217,13 +255,32 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
         throw new PaymentError('Transaction not found')
       }
 
-      const transaction = transactionsResults.docs[0] as unknown as Record<string, unknown> & {
+      interface ComgateTransaction {
         id: string | number
         amount: number
         currency?: string
         customerEmail?: string
-        cart?: { id: string | number; items: Array<{ product: unknown; variant?: unknown; quantity: number }> }
+        cart?: {
+          id: string | number
+          items: Array<{ product: unknown; variant?: unknown; quantity: number }>
+        }
         comgate?: Record<string, unknown>
+        [key: string]: unknown
+      }
+      const transaction = transactionsResults.docs[0] as unknown as ComgateTransaction
+
+      // Idempotency guard: if order already created for this transaction, return it
+      if (transaction.order) {
+        const existingOrderId =
+          typeof transaction.order === 'object' && transaction.order !== null
+            ? (transaction.order as { id: number }).id
+            : (transaction.order as number)
+        return {
+          message: 'Order already confirmed',
+          orderID: existingOrderId,
+          transactionID: transaction.id as number,
+          customerEmail: transaction.customerEmail,
+        }
       }
 
       // Verify payment status
@@ -234,7 +291,11 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
 
       if (isMockTransactionId(transId)) {
         payload.logger.info('🧪 MOCK MODE: Simulating successful payment verification')
-        const mockStatus = createMockStatusResponse(transId, transaction.amount, transaction.currency)
+        const mockStatus = createMockStatusResponse(
+          transId,
+          transaction.amount,
+          transaction.currency,
+        )
         paymentStatus = mockStatus.status!
         fee = mockStatus.fee
         payerName = mockStatus.payerName
@@ -252,20 +313,34 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
         payerAcc = statusResponse.payerAcc
       }
 
-      // Extract order items from cart
-      const orderItems = (transaction.cart?.items?.map((item) => ({
-        product: typeof item.product === 'object' && item.product !== null
-          ? (item.product as { id: string | number }).id
-          : item.product,
-        variant: item.variant
-          ? (typeof item.variant === 'object' && item.variant !== null
-              ? (item.variant as { id: string | number }).id
-              : item.variant)
-          : undefined,
-        quantity: item.quantity,
-      })) || []) as Array<{ product?: number | null; variant?: number | null; quantity: number }>
+      // Extract order items from cart with prices
+      const priceField = `priceIn${transaction.currency || 'EUR'}`
+      const salePriceField = `salePriceIn${transaction.currency || 'EUR'}`
 
-      // Create order - use type assertion for flexibility across different Payload configs
+      const orderItems = (transaction.cart?.items?.map((item) => {
+        const product =
+          typeof item.product === 'object' && item.product !== null
+            ? (item.product as Record<string, unknown>)
+            : null
+        const variant =
+          item.variant && typeof item.variant === 'object'
+            ? (item.variant as Record<string, unknown>)
+            : null
+        const source = variant || product
+        const regularPrice = (source?.[priceField] as number) || 0
+        const salePrice = source?.saleEnabled ? (source?.[salePriceField] as number) : null
+        const price = salePrice && salePrice < regularPrice ? salePrice : regularPrice
+
+        return {
+          product: product ? (product.id as number) : item.product,
+          variant: variant ? (variant.id as number) : item.variant,
+          quantity: item.quantity,
+          priceAtPurchase: price / 100, // cents → decimal
+        }
+      }) || []) as Array<{ product?: number | null; variant?: number | null; quantity: number; priceAtPurchase: number }>
+
+      // Create order with complete pricing + address data from transaction
+      const transactionData = transaction as Record<string, unknown>
       const orderData = {
         customer: req.user?.id || undefined,
         customerEmail: transaction.customerEmail,
@@ -273,11 +348,26 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
         amount: transaction.amount,
         currency: transaction.currency,
         status: 'processing',
-        // Copy additional data from transaction
-        ...(transaction.discount ? { discount: transaction.discount } : {}),
-        ...(transaction.shippingMethod ? { shippingMethod: transaction.shippingMethod } : {}),
-        ...(transaction.subtotalBeforeDiscount ? { subtotalBeforeDiscount: transaction.subtotalBeforeDiscount } : {}),
-        ...(transaction.shippingAddress ? { shippingAddress: transaction.shippingAddress } : {}),
+        // Pricing breakdown
+        subtotal: transactionData.subtotal,
+        subtotalBeforeDiscount: transactionData.subtotalBeforeDiscount,
+        discountAmount: transactionData.discountAmount,
+        shippingCost: transactionData.shippingCost,
+        grandTotal: transactionData.grandTotal,
+        freeShipping: transactionData.freeShipping,
+        // Discount details
+        ...(transactionData.discount ? { discount: transactionData.discount } : {}),
+        // Shipping method
+        ...(transactionData.shippingMethod
+          ? { shippingMethod: transactionData.shippingMethod }
+          : {}),
+        // Addresses
+        ...(transactionData.shippingAddress
+          ? { shippingAddress: transactionData.shippingAddress }
+          : {}),
+        ...(transactionData.billingAddress
+          ? { billingAddress: transactionData.billingAddress }
+          : {}),
       }
 
       const order = await payload.create({
@@ -316,6 +406,7 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
         message: 'Order confirmed successfully',
         orderID: order.id as number,
         transactionID: transaction.id as number,
+        customerEmail: transaction.customerEmail,
       }
     } catch (error) {
       payload.logger.error(error, 'Error confirming order with Comgate')
@@ -325,7 +416,7 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
       }
 
       throw new PaymentError(
-        error instanceof Error ? error.message : 'Unknown error confirming order'
+        error instanceof Error ? error.message : 'Unknown error confirming order',
       )
     }
   }

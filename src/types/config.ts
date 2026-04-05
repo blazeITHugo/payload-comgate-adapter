@@ -1,4 +1,7 @@
-import type { PaymentAdapterArgs, PaymentAdapterClientArgs } from '@payloadcms/plugin-ecommerce/types'
+import type {
+  PaymentAdapterArgs,
+  PaymentAdapterClientArgs,
+} from '@payloadcms/plugin-ecommerce/types'
 
 /**
  * Supported Comgate languages

@@ -33,7 +33,7 @@ export function generateMockTransId(refId: string): string {
 export function createMockPaymentResponse(
   refId: string,
   customerEmail: string,
-  serverUrl: string
+  serverUrl: string,
 ): ComgateCreateResponse {
   const mockTransId = generateMockTransId(refId)
   return {
@@ -50,7 +50,7 @@ export function createMockPaymentResponse(
 export function createMockStatusResponse(
   transId: string,
   amount: number,
-  currency?: string
+  currency?: string,
 ): ComgateStatusResponse {
   return {
     code: 0,

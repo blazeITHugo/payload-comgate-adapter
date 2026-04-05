@@ -1,9 +1,5 @@
 // Config types
-export type {
-  ComgateAdapterArgs,
-  ComgateAdapterClientArgs,
-  ComgateLanguage,
-} from './config'
+export type { ComgateAdapterArgs, ComgateAdapterClientArgs, ComgateLanguage } from './config'
 
 // API types
 export type {

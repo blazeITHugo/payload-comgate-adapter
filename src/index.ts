@@ -20,6 +20,10 @@ export type {
   ConfirmOrderReturnType,
 } from './types'
 
+// Refund
+export { refundPayment } from './refund'
+export type { RefundResult, RefundConfig } from './refund'
+
 // Utils (for advanced usage)
 export {
   PaymentError,

@@ -6,6 +6,4 @@
 
 export { comgateAdapterClient } from './comgateAdapterClient'
 
-export type {
-  ComgateAdapterClientArgs,
-} from './types'
+export type { ComgateAdapterClientArgs } from './types'

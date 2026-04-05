@@ -10,10 +10,13 @@ Comgate payment gateway adapter for [PayloadCMS](https://payloadcms.com/) ecomme
 ## Features
 
 - Full integration with `@payloadcms/plugin-ecommerce`
-- Support for all Comgate payment methods
+- Support for all Comgate payment methods (cards, bank transfers, Google Pay, Apple Pay)
+- Complete pricing breakdown (subtotal, discount, shipping, grandTotal)
+- Address passthrough (billing + shipping) to orders
 - Built-in mock mode for development
 - TypeScript support with full type safety
 - Test mode support for sandbox payments
+- Compatible with Next.js 16 canary
 
 ## Installation
 
@@ -27,7 +30,8 @@ yarn add payload-comgate-adapter
 
 ## Requirements
 
-- PayloadCMS 3.x
+- PayloadCMS 3.x (tested with 3.79.1)
+- Next.js 15+ or Next.js 16
 - `@payloadcms/plugin-ecommerce` ^3.60.0
 
 ## Quick Start
@@ -53,7 +57,7 @@ export default buildConfig({
             secret: process.env.COMGATE_SECRET!,
             testMode: process.env.NODE_ENV !== 'production',
             country: 'SK', // or 'CZ'
-            lang: 'sk',    // or 'cs', 'en'
+            lang: 'sk', // or 'cs', 'en'
           }),
         ],
       },
@@ -96,22 +100,22 @@ COMGATE_SECRET=your-secret
 
 ### Server Adapter (`comgateAdapter`)
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `merchantId` | `string` | **required** | Comgate merchant ID (6-digit number) |
-| `secret` | `string` | **required** | Comgate API secret |
-| `testMode` | `boolean` | `false` | Enable Comgate test/sandbox mode |
-| `country` | `string` | `'CZ'` | Default country code (ISO 3166-1 alpha-2) |
-| `lang` | `string` | `'cs'` | Payment page language (`cs`, `sk`, `en`, `pl`, `hu`, `ro`, `de`, `fr`, `es`, `it`) |
-| `preauth` | `boolean` | `false` | Enable preauthorization mode |
-| `method` | `string` | `'ALL'` | Payment method filter |
-| `label` | `string` | `'Comgate'` | Display label |
-| `serverUrl` | `string` | auto | Base URL for return redirects |
+| Option       | Type      | Default      | Description                                                                        |
+| ------------ | --------- | ------------ | ---------------------------------------------------------------------------------- |
+| `merchantId` | `string`  | **required** | Comgate merchant ID (6-digit number)                                               |
+| `secret`     | `string`  | **required** | Comgate API secret                                                                 |
+| `testMode`   | `boolean` | `false`      | Enable Comgate test/sandbox mode                                                   |
+| `country`    | `string`  | `'CZ'`       | Default country code (ISO 3166-1 alpha-2)                                          |
+| `lang`       | `string`  | `'cs'`       | Payment page language (`cs`, `sk`, `en`, `pl`, `hu`, `ro`, `de`, `fr`, `es`, `it`) |
+| `preauth`    | `boolean` | `false`      | Enable preauthorization mode                                                       |
+| `method`     | `string`  | `'ALL'`      | Payment method filter                                                              |
+| `label`      | `string`  | `'Comgate'`  | Display label                                                                      |
+| `serverUrl`  | `string`  | auto         | Base URL for return redirects                                                      |
 
 ### Client Adapter (`comgateAdapterClient`)
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
+| Option  | Type     | Default     | Description                      |
+| ------- | -------- | ----------- | -------------------------------- |
 | `label` | `string` | `'Comgate'` | Display label for payment method |
 
 ## Mock Mode (Development)
@@ -127,6 +131,7 @@ comgateAdapter({
 ```
 
 In mock mode:
+
 - No real API calls are made
 - Payments are automatically "successful"
 - Transaction IDs start with `MOCK-`
@@ -156,13 +161,15 @@ The adapter adds a `comgate` group field to transactions with:
 
 ## Webhook Support (STATUS URL)
 
-Comgate supports async payment status notifications via STATUS URL. Configure the webhook URL in your Comgate portal:
+Comgate sends async payment status notifications via STATUS URL. Configure the webhook URL in your Comgate portal:
 
 ```
 https://yourdomain.com/api/payments/comgate/webhook
 ```
 
-> Note: Webhook endpoint implementation coming soon.
+The webhook verifies the `secret` parameter sent by Comgate using timing-safe comparison, implements idempotency checks, and updates transaction status accordingly.
+
+See the [webhook example](https://github.com/blazeITHugo/payload-comgate-adapter#webhook-support-status-url) for a ready-to-use Next.js route handler.
 
 ## Getting Comgate Credentials
 
@@ -213,12 +220,34 @@ comgateAdapter({
 For advanced scenarios, you can use the API utilities directly:
 
 ```typescript
-import {
-  createPayment,
-  getPaymentStatus,
-  createAuthHeader,
-} from 'payload-comgate-adapter'
+import { createPayment, getPaymentStatus, createAuthHeader } from 'payload-comgate-adapter'
 ```
+
+## Changelog
+
+### 0.3.0
+
+- **Refund implemented** — real Comgate API call to `/v1.0/refund` (was a stub returning fake success)
+- Mock mode support for refunds (test credentials skip API call)
+- 20 adapter tests (initiatePayment, confirmOrder, refund flows)
+- PayloadCMS 3.79.1 tested
+
+### 0.2.0
+
+- Complete pricing breakdown passthrough (subtotal, discount, shipping, grandTotal, freeShipping)
+- Billing and shipping address passthrough to orders
+- Fixed currency unit mismatch (cents vs units)
+- Fixed API format (form-urlencoded)
+- Fixed Authorization header for API calls
+- Added `returnUrl` to payment requests
+- Added `customerEmail` to confirm order response
+- Mock mode improvements (payerName, payerAcc in mock responses)
+- Next.js 16 canary compatibility
+- PayloadCMS 3.76 tested
+
+### 0.1.1
+
+- Initial release
 
 ## Contributing
 

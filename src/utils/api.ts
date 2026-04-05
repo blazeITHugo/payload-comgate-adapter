@@ -21,7 +21,7 @@ export function createAuthHeader(merchantId: string, secret: string): string {
 export async function createPayment(
   merchantId: string,
   secret: string,
-  request: ComgatePaymentRequest
+  request: ComgatePaymentRequest,
 ): Promise<ComgateCreateResponse> {
   // Comgate API expects form-urlencoded data
   const formData = new URLSearchParams()
@@ -45,19 +45,17 @@ export async function createPayment(
   }
 
   const apiUrl = `${COMGATE_API_URL}/create`
-  console.log('[Comgate] Creating payment:', { apiUrl, formData: formData.toString() })
 
   const response = await fetch(apiUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
-      'Authorization': createAuthHeader(merchantId, secret),
+      Authorization: createAuthHeader(merchantId, secret),
     },
     body: formData.toString(),
   })
 
   const responseText = await response.text()
-  console.log('[Comgate] Response status:', response.status, 'Body:', responseText)
 
   // Parse response (Comgate returns key=value pairs)
   const responseParams = new URLSearchParams(responseText)
@@ -67,7 +65,9 @@ export async function createPayment(
   const redirect = responseParams.get('redirect') || undefined
 
   if (code !== 0) {
-    throw new PaymentError(`Comgate error (${code}): ${message} | Raw: ${responseText.substring(0, 200)}`)
+    throw new PaymentError(
+      `Comgate error (${code}): ${message} | Raw: ${responseText.substring(0, 200)}`,
+    )
   }
 
   return {
@@ -84,7 +84,7 @@ export async function createPayment(
 export async function getPaymentStatus(
   merchantId: string,
   secret: string,
-  transId: string
+  transId: string,
 ): Promise<ComgateStatusResponse> {
   // Comgate API expects form-urlencoded POST data
   const formData = new URLSearchParams()

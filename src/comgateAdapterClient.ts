@@ -15,9 +15,7 @@ import type { ComgateAdapterClientArgs } from './types'
  * >
  * ```
  */
-export const comgateAdapterClient = (
-  config?: ComgateAdapterClientArgs
-): PaymentAdapterClient => {
+export const comgateAdapterClient = (config?: ComgateAdapterClientArgs): PaymentAdapterClient => {
   const { label = 'Comgate' } = config || {}
 
   return {
