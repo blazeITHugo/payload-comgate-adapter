@@ -4,9 +4,41 @@ import type {
 } from '@payloadcms/plugin-ecommerce/types'
 
 /**
- * Supported Comgate languages
+ * Supported Comgate payment page languages (ISO 639-1)
+ * @see https://help.comgate.cz/docs/en/currencies-and-languages
  */
-export type ComgateLanguage = 'cs' | 'sk' | 'en' | 'pl' | 'hu' | 'ro' | 'de' | 'fr' | 'es' | 'it'
+export type ComgateLanguage =
+  | 'cs'
+  | 'sk'
+  | 'en'
+  | 'pl'
+  | 'hu'
+  | 'ro'
+  | 'de'
+  | 'fr'
+  | 'es'
+  | 'it'
+  | 'hr'
+  | 'sl'
+  | 'no'
+  | 'sv'
+
+/**
+ * Supported Comgate currencies (ISO 4217)
+ * Non-CZK currencies may require activation via Comgate support
+ * (bank statement proving account can accept the currency).
+ * @see https://help.comgate.cz/docs/en/currencies-and-languages
+ */
+export type ComgateCurrency =
+  | 'CZK'
+  | 'EUR'
+  | 'PLN'
+  | 'HUF'
+  | 'USD'
+  | 'GBP'
+  | 'RON'
+  | 'NOK'
+  | 'SEK'
 
 /**
  * Server-side Comgate adapter configuration

@@ -1,6 +1,6 @@
 import type { PaymentAdapter } from '@payloadcms/plugin-ecommerce/types'
 import type { Field, GroupField } from 'payload'
-import type { ComgateAdapterArgs, ComgatePaymentRequest } from './types'
+import type { ComgateAdapterArgs, ComgateCurrency, ComgatePaymentRequest } from './types'
 import {
   PaymentError,
   createPayment,
@@ -126,7 +126,7 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
           paymentMethod: 'comgate' as const,
           status: 'pending' as const,
           amount: grandTotalInCurrency,
-          currency: currency.toUpperCase() as 'EUR' | 'CZK',
+          currency: currency.toUpperCase() as ComgateCurrency,
           cart: typeof cart.id === 'number' ? cart.id : undefined,
           customerEmail,
           // Pricing breakdown

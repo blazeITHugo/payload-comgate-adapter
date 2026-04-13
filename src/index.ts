@@ -11,6 +11,7 @@ export { comgateAdapter } from './comgateAdapter'
 export type {
   ComgateAdapterArgs,
   ComgateAdapterClientArgs,
+  ComgateCurrency,
   ComgateLanguage,
   ComgateCreateResponse,
   ComgateStatusResponse,

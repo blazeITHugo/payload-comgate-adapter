@@ -106,11 +106,29 @@ COMGATE_SECRET=your-secret
 | `secret`     | `string`  | **required** | Comgate API secret                                                                 |
 | `testMode`   | `boolean` | `false`      | Enable Comgate test/sandbox mode                                                   |
 | `country`    | `string`  | `'CZ'`       | Default country code (ISO 3166-1 alpha-2)                                          |
-| `lang`       | `string`  | `'cs'`       | Payment page language (`cs`, `sk`, `en`, `pl`, `hu`, `ro`, `de`, `fr`, `es`, `it`) |
+| `lang`       | `ComgateLanguage` | `'cs'` | Payment page language — see [Supported languages](#supported-languages)          |
 | `preauth`    | `boolean` | `false`      | Enable preauthorization mode                                                       |
 | `method`     | `string`  | `'ALL'`      | Payment method filter                                                              |
 | `label`      | `string`  | `'Comgate'`  | Display label                                                                      |
 | `serverUrl`  | `string`  | auto         | Base URL for return redirects                                                      |
+
+### Supported languages
+
+`ComgateLanguage` accepts the following ISO 639-1 codes:
+
+`cs`, `sk`, `en`, `pl`, `hu`, `ro`, `de`, `fr`, `es`, `it`, `hr`, `sl`, `no`, `sv`
+
+See [Comgate currencies and languages](https://help.comgate.cz/docs/en/currencies-and-languages) for the authoritative list.
+
+### Supported currencies
+
+The adapter does **not** restrict currencies — the order's `currency` field is passed through to Comgate as-is. Comgate supports these ISO 4217 codes (exported as `ComgateCurrency`):
+
+`CZK`, `EUR`, `PLN`, `HUF`, `USD`, `GBP`, `RON`, `NOK`, `SEK`
+
+> Only `CZK` is enabled by default on every merchant account. To accept any other currency, contact Comgate support with a bank statement proving your account can receive that currency. See [Comgate currencies and languages](https://help.comgate.cz/docs/en/currencies-and-languages).
+
+Consumers should narrow the allowed set in their own Payload `transactions` collection schema (e.g. voxberg restricts to `'EUR' | 'CZK'`).
 
 ### Client Adapter (`comgateAdapterClient`)
 
