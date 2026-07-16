@@ -12,5 +12,5 @@ export default defineConfig({
   sourcemap: true,
   splitting: false,
   treeshake: true,
-  external: ['payload', '@payloadcms/plugin-ecommerce'],
+  external: ['payload', '@payloadcms/plugin-ecommerce', 'payload-payment-shared'],
 })

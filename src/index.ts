@@ -26,14 +26,18 @@ export { refundPayment } from './refund'
 export type { RefundResult, RefundConfig } from './refund'
 
 // Utils (for advanced usage)
+//
+// NOTE: `MOCK_MERCHANT_ID` / `MOCK_SECRET` are intentionally NOT
+// re-exported from the public API (audit P1). Consumers should switch
+// to `PAYMENT_MOCK_MODE=true` env var (or adapter `mode: 'mock'`)
+// instead of string-literal credentials. Tests inside this package
+// that still need the literals import them from `./utils/mock`.
 export {
   PaymentError,
   COMGATE_API_URL,
   createAuthHeader,
   createPayment,
   getPaymentStatus,
-  MOCK_MERCHANT_ID,
-  MOCK_SECRET,
   isMockMode,
   isMockTransactionId,
 } from './utils'

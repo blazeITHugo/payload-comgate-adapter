@@ -38,9 +38,12 @@ export async function refundPayment(
     return { success: true, refundId: `mock-refund-${Date.now()}` }
   }
 
+  // Comgate accepts either Basic Auth OR `secret` in the form body —
+  // not both. We send Basic Auth and omit the body secret; matches the
+  // pattern used by every other endpoint and avoids duplicate-credential
+  // "ambiguous auth" parser quirks.
   const formData = new URLSearchParams()
   formData.append('merchant', merchantId)
-  formData.append('secret', secret)
   formData.append('transId', transactionId)
   formData.append('amount', String(Math.round(amount * 100)))
   formData.append('curr', currency.toUpperCase())

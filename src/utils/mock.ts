@@ -1,16 +1,28 @@
 import type { ComgateCreateResponse, ComgateStatusResponse } from '../types'
+import { resolvePaymentMode } from 'payload-payment-shared'
 
 /**
- * Mock merchant credentials for development
+ * Legacy mock merchant credentials for development.
+ *
+ * @deprecated Prefer `PAYMENT_MOCK_MODE=true` env var or explicit
+ * `mode: 'mock'` adapter config. Literal credentials are rejected in
+ * `NODE_ENV=production` without `ALLOW_MOCK_PAYMENTS=1`.
  */
 export const MOCK_MERCHANT_ID = 'test-merchant-id'
 export const MOCK_SECRET = 'test-secret'
 
 /**
- * Check if mock mode is enabled based on credentials
+ * Check if mock mode is enabled.
+ *
+ * Delegates to `resolvePaymentMode` so prod deployments can't silently
+ * slip into mock mode via a stray `.env.production` value.
  */
 export function isMockMode(merchantId: string, secret: string): boolean {
-  return merchantId === MOCK_MERCHANT_ID && secret === MOCK_SECRET
+  try {
+    return resolvePaymentMode({ merchantId, secret }) === 'mock'
+  } catch {
+    return false
+  }
 }
 
 /**

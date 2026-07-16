@@ -182,4 +182,11 @@ export interface ComgatePaymentRequest {
   lang: string
   preauth: boolean
   returnUrl: string
+  /**
+   * When 'Y', the customer's card is enrolled for recurring billing and
+   * Comgate returns a `payerAcc` token on the create/status response.
+   * Used for first-payment of subscription orders. Subsequent recurring
+   * charges send `initRecurring: 'N'` plus the stored `payerAcc`.
+   */
+  initRecurring?: 'Y' | 'N'
 }

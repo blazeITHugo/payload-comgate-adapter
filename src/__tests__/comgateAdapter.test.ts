@@ -15,6 +15,11 @@ function createMockPayload() {
       error: vi.fn(),
       warn: vi.fn(),
     },
+    // withPaymentLock: no beginTransaction → initTransaction is a no-op, and
+    // the advisory lock runs on the pool (payload.db.drizzle) directly.
+    db: {
+      drizzle: { execute: vi.fn().mockResolvedValue(undefined) },
+    },
   }
 }
 
@@ -207,7 +212,10 @@ describe('comgateAdapter (mock mode)', () => {
     }
 
     it('verifies PAID status and creates order in mock mode', async () => {
-      payload.find.mockResolvedValueOnce({ docs: [mockTransaction] })
+      // Transaction stored a customer during initiatePayment — order
+      // should inherit it from the transaction (NOT from req.user).
+      const tx = { ...mockTransaction, customer: 5 }
+      payload.find.mockResolvedValue({ docs: [tx] })
       payload.create.mockResolvedValueOnce({ id: 200 })
       payload.update.mockResolvedValue({})
 
@@ -219,12 +227,16 @@ describe('comgateAdapter (mock mode)', () => {
         cartsSlug: 'carts',
       } as never)
 
-      // Find transaction by comgate transId
-      expect(payload.find).toHaveBeenCalledWith({
-        collection: 'transactions',
-        where: { 'comgate.transId': { equals: 'MOCK-42-1234567890' } },
-        depth: 2,
-      })
+      // Find transaction by comgate transId — re-read inside the payment
+      // lock with full depth (the pre-lock read is a depth-0 snapshot)
+      expect(payload.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          collection: 'transactions',
+          where: { 'comgate.transId': { equals: 'MOCK-42-1234567890' } },
+          depth: 2,
+          overrideAccess: true,
+        }),
+      )
 
       // Order created with correct data
       expect(payload.create).toHaveBeenCalledOnce()
@@ -236,12 +248,12 @@ describe('comgateAdapter (mock mode)', () => {
       expect(orderCall.data.customerEmail).toBe('test@example.com')
       expect(orderCall.data.customer).toBe(5)
 
-      // Cart marked as purchased
+      // Cart marked as purchased AND detached from the customer in one update
       expect(payload.update).toHaveBeenCalledWith(
         expect.objectContaining({
           id: 1,
           collection: 'carts',
-          data: { purchasedAt: expect.any(String) },
+          data: { purchasedAt: expect.any(String), customer: null },
         }),
       )
 
@@ -342,7 +354,7 @@ describe('comgateAdapter (mock mode)', () => {
         discount: { code: 'SAVE10', calculatedAmount: 50000 },
         shippingMethod: { name: 'DPD', cost: 150 },
       }
-      payload.find.mockResolvedValueOnce({ docs: [transactionWithPricing] })
+      payload.find.mockResolvedValue({ docs: [transactionWithPricing] })
       payload.create.mockResolvedValueOnce({ id: 300 })
       payload.update.mockResolvedValue({})
 
@@ -384,7 +396,9 @@ describe('comgateAdapter (mock mode)', () => {
         cart: { id: 1, items: [] },
       }
 
-      payload.find.mockResolvedValueOnce({ docs: [transaction] })
+      payload.find.mockResolvedValue({ docs: [transaction] })
+      // Mock the atomic confirming update (race-condition guard)
+      payload.update.mockResolvedValueOnce(transaction)
 
       // Mock Comgate status API returning CANCELLED
       vi.mocked(fetch).mockResolvedValueOnce(

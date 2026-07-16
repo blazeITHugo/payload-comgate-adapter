@@ -43,6 +43,12 @@ export async function createPayment(
   if (request.preauth) {
     formData.append('preauth', 'true')
   }
+  if (request.initRecurring) {
+    // 'Y' enrols the card for recurring billing — Comgate returns a
+    // `payerAcc` token on the status response that we store on the
+    // transaction for later cron-driven charges.
+    formData.append('initRecurring', request.initRecurring)
+  }
 
   const apiUrl = `${COMGATE_API_URL}/create`
 
@@ -50,7 +56,6 @@ export async function createPayment(
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
-      Authorization: createAuthHeader(merchantId, secret),
     },
     body: formData.toString(),
   })

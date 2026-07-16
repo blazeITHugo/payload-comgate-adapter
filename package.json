@@ -1,6 +1,6 @@
 {
   "name": "payload-comgate-adapter",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Comgate payment gateway adapter for PayloadCMS ecommerce plugin",
   "type": "module",
   "main": "./dist/index.js",
@@ -51,12 +51,14 @@
   },
   "homepage": "https://github.com/blazeITHugo/payload-comgate-adapter#readme",
   "peerDependencies": {
-    "@payloadcms/plugin-ecommerce": "^3.60.0",
-    "payload": "^3.0.0"
+    "@payloadcms/plugin-ecommerce": "^3.81.0",
+    "payload": "^3.81.0",
+    "payload-payment-shared": "^0.1.0"
   },
   "devDependencies": {
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
-    "vitest": "3.2.3"
+    "vitest": "3.2.7",
+    "payload-payment-shared": "^0.1.0"
   }
 }

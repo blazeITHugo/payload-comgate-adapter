@@ -2,6 +2,7 @@
 export type {
   ComgateAdapterArgs,
   ComgateAdapterClientArgs,
+  ComgateConnectionCredentials,
   ComgateCurrency,
   ComgateLanguage,
 } from './config'

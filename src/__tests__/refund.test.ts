@@ -45,13 +45,21 @@ describe('Comgate refundPayment', () => {
     expect(url).toBe('https://payments.comgate.cz/v1.0/refund')
     expect(options?.method).toBe('POST')
 
-    // Verify form body
+    // Verify form body — `secret` is NOT in the body anymore (audit
+    // P1). Comgate accepts either Basic Auth or form `secret`, not
+    // both; we standardise on Basic Auth.
     const body = new URLSearchParams(options?.body as string)
     expect(body.get('merchant')).toBe('real-merchant')
-    expect(body.get('secret')).toBe('real-secret')
+    expect(body.get('secret')).toBeNull()
     expect(body.get('transId')).toBe('TX-ABC-123')
     expect(body.get('amount')).toBe('2499') // cents
     expect(body.get('curr')).toBe('EUR')
+
+    // Basic Auth header MUST be set with `merchant:secret`.
+    const headers = (options?.headers as Record<string, string>) ?? {}
+    expect(headers.Authorization).toMatch(/^Basic /)
+    const decoded = Buffer.from(headers.Authorization.replace('Basic ', ''), 'base64').toString()
+    expect(decoded).toBe('real-merchant:real-secret')
   })
 
   it('returns error when Comgate responds with non-zero code', async () => {

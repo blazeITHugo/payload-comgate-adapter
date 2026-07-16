@@ -1,8 +1,11 @@
 export { PaymentError } from './errors'
+export { asTransactionDoc } from './casts'
+export { resolveCustomerId } from './resolveCustomerId'
 export { COMGATE_API_URL, createAuthHeader, createPayment, getPaymentStatus } from './api'
+// NOTE: MOCK_MERCHANT_ID / MOCK_SECRET are *not* part of the public
+// barrel anymore (audit P1). Tests inside this package import from
+// './mock' directly if they still need the literals.
 export {
-  MOCK_MERCHANT_ID,
-  MOCK_SECRET,
   isMockMode,
   isMockTransactionId,
   generateMockTransId,
