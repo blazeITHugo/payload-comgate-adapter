@@ -278,6 +278,42 @@ describe('comgateAdapter (mock mode)', () => {
       expect(fetch).not.toHaveBeenCalled()
     })
 
+    it('reads the stored customer off a populated relation, not just a bare id', async () => {
+      const tx = { ...mockTransaction, customer: { id: 9, email: 'stored@example.com' } }
+      payload.find.mockResolvedValue({ docs: [tx] })
+      payload.create.mockResolvedValueOnce({ id: 203 })
+      payload.update.mockResolvedValue({})
+
+      await adapter.confirmOrder({
+        data: { transId: 'MOCK-42-1234567890' },
+        ordersSlug: 'orders',
+        req: createMockReq(payload, { id: 999 }),
+        transactionsSlug: 'transactions',
+        cartsSlug: 'carts',
+      } as never)
+
+      // Never req.user (999) — the transaction's own customer wins.
+      expect(payload.create.mock.calls[0][0].data.customer).toBe(9)
+    })
+
+    it('rejects a non-numeric order relation instead of typing it as a number', async () => {
+      payload.find.mockResolvedValueOnce({
+        docs: [{ ...mockTransaction, order: { id: 'ord_abc' } }],
+      })
+
+      await expect(
+        adapter.confirmOrder({
+          data: { transId: 'MOCK-42-1234567890' },
+          ordersSlug: 'orders',
+          req: createMockReq(payload),
+          transactionsSlug: 'transactions',
+          cartsSlug: 'carts',
+        } as never),
+      ).rejects.toMatchObject({ code: 'ORDER_RELATION_INVALID' })
+
+      expect(payload.create).not.toHaveBeenCalled()
+    })
+
     it('returns existing order if already confirmed (idempotency)', async () => {
       payload.find.mockResolvedValueOnce({
         docs: [{ ...mockTransaction, order: { id: 200 } }],
@@ -417,6 +453,285 @@ describe('comgateAdapter (mock mode)', () => {
           cartsSlug: 'carts',
         } as never),
       ).rejects.toThrow(/Payment not completed.*CANCELLED/)
+    })
+  })
+
+  describe('wallet methods (real API path)', () => {
+    const realAdapter = () =>
+      comgateAdapter({
+        merchantId: 'real-merchant',
+        secret: 'real-secret',
+        serverUrl: 'https://example.com',
+      })
+
+    const initiate = (adapterUnderTest: ReturnType<typeof comgateAdapter>, comgateMethod: string) =>
+      adapterUnderTest.initiatePayment({
+        data: {
+          currency: 'CZK',
+          customerEmail: 'test@example.com',
+          cart: makeCart(),
+          comgateMethod,
+        },
+        req: createMockReq(payload),
+        transactionsSlug: 'transactions',
+      } as never)
+
+    const sentMethod = (call: number) =>
+      new URLSearchParams(vi.mocked(fetch).mock.calls[call]![1]!.body as string).get('method')
+
+    it('sends the _REDIRECT wire code for the legacy bare wallet code', async () => {
+      payload.create.mockResolvedValueOnce({ id: 42 })
+      payload.update.mockResolvedValue({})
+      vi.mocked(fetch).mockResolvedValueOnce(
+        new Response('code=0&message=OK&transId=TX-1&redirect=https%3A%2F%2Fpay.example', {
+          status: 200,
+        }),
+      )
+
+      await initiate(realAdapter(), 'APPLEPAY')
+
+      expect(sentMethod(0)).toBe('APPLEPAY_REDIRECT')
+    })
+
+    it('retries with the default method when Comgate rejects the wallet (1109)', async () => {
+      payload.create.mockResolvedValueOnce({ id: 42 })
+      payload.update.mockResolvedValue({})
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(
+          new Response('code=1109&message=Invalid payment method [GOOGLEPAY_REDIRECT]', {
+            status: 200,
+          }),
+        )
+        .mockResolvedValueOnce(
+          new Response('code=0&message=OK&transId=TX-2&redirect=https%3A%2F%2Fpay.example', {
+            status: 200,
+          }),
+        )
+
+      const result = await initiate(realAdapter(), 'GOOGLEPAY_REDIRECT')
+
+      expect(sentMethod(0)).toBe('GOOGLEPAY_REDIRECT')
+      expect(sentMethod(1)).toBe('ALL')
+      expect(result.transactionID).toBe(42)
+      expect(result.gatewayTransactionId).toBe('TX-2')
+    })
+
+    it('does not retry an error that is not 1109', async () => {
+      payload.create.mockResolvedValueOnce({ id: 42 })
+      payload.update.mockResolvedValue({})
+      vi.mocked(fetch).mockResolvedValueOnce(
+        new Response('code=1400&message=Invalid request', { status: 200 }),
+      )
+
+      await expect(initiate(realAdapter(), 'APPLEPAY_REDIRECT')).rejects.toThrow(/1400/)
+      expect(vi.mocked(fetch)).toHaveBeenCalledOnce()
+    })
+  })
+
+  describe('injection points', () => {
+    it('lets validateCart refuse the payment before any write', async () => {
+      const guarded = comgateAdapter({
+        merchantId: MOCK_MERCHANT_ID,
+        secret: MOCK_SECRET,
+        validateCart: (ctx) => {
+          if (ctx.subtotalCents < 500000) throw new Error('Minimum order value not reached')
+        },
+      })
+
+      await expect(
+        guarded.initiatePayment({
+          data: { currency: 'EUR', customerEmail: 'test@example.com', cart: makeCart() },
+          req: createMockReq(payload),
+          transactionsSlug: 'transactions',
+        } as never),
+      ).rejects.toThrow('Minimum order value not reached')
+
+      expect(payload.create).not.toHaveBeenCalled()
+    })
+
+    it('charges the discount resolveDiscountCents returns, not the claim', async () => {
+      const revalidating = comgateAdapter({
+        merchantId: MOCK_MERCHANT_ID,
+        secret: MOCK_SECRET,
+        // The client claimed 1000.00; the host can only verify 100.00.
+        resolveDiscountCents: () => 10000,
+      })
+      payload.create.mockResolvedValueOnce({ id: 60 })
+      payload.update.mockResolvedValueOnce({})
+
+      await revalidating.initiatePayment({
+        data: {
+          currency: 'CZK',
+          customerEmail: 'buyer@example.com',
+          cart: makeCart({ subtotal: 500000 }),
+          discount: { calculatedAmount: 100000 },
+        },
+        req: createMockReq(payload),
+        transactionsSlug: 'transactions',
+      } as never)
+
+      const createCall = payload.create.mock.calls[0][0]
+      expect(createCall.data.discountAmount).toBe(100)
+      expect(createCall.data.grandTotal).toBe(4900) // 5000 − 100
+    })
+
+    it('writes what enrichTransactionData returns', async () => {
+      const enriched = comgateAdapter({
+        merchantId: MOCK_MERCHANT_ID,
+        secret: MOCK_SECRET,
+        enrichTransactionData: (data, ctx) => ({
+          ...data,
+          tenant: 5,
+          customerNote: ctx.data.customerNote,
+        }),
+      })
+      payload.create.mockResolvedValueOnce({ id: 61 })
+      payload.update.mockResolvedValueOnce({})
+
+      await enriched.initiatePayment({
+        data: {
+          currency: 'EUR',
+          customerEmail: 'test@example.com',
+          cart: makeCart(),
+          customerNote: 'ring the bell',
+        },
+        req: createMockReq(payload),
+        transactionsSlug: 'transactions',
+      } as never)
+
+      const createCall = payload.create.mock.calls[0][0]
+      expect(createCall.data.tenant).toBe(5)
+      expect(createCall.data.customerNote).toBe('ring the bell')
+      // The adapter's own fields survive the merge.
+      expect(createCall.data.paymentMethod).toBe('comgate')
+    })
+
+    it('rejects a stale cart whose currency is not what the storefront displayed', async () => {
+      await expect(
+        adapter.initiatePayment({
+          data: {
+            currency: 'CZK',
+            expectedCurrency: 'EUR',
+            customerEmail: 'test@example.com',
+            cart: makeCart(),
+          },
+          req: createMockReq(payload),
+          transactionsSlug: 'transactions',
+        } as never),
+      ).rejects.toMatchObject({ code: 'CART_CURRENCY_MISMATCH' })
+
+      expect(payload.create).not.toHaveBeenCalled()
+    })
+
+    it('prices order lines with resolveItemPricing and merges its extra fields', async () => {
+      const bundled = comgateAdapter({
+        merchantId: MOCK_MERCHANT_ID,
+        secret: MOCK_SECRET,
+        // A cart-written apportioned price the catalog cannot reproduce.
+        resolveItemPricing: ({ item }) => ({
+          price: (item.priceAtPurchase as number) * 100,
+          originalPrice: 150000,
+          extraFields: { bundleAssignmentKey: 'bundle-1' },
+        }),
+      })
+      const tx = {
+        id: 42,
+        amount: 2000,
+        currency: 'EUR',
+        customerEmail: 'test@example.com',
+        comgate: { transId: 'MOCK-42-1234567890' },
+        cart: {
+          id: 1,
+          items: [
+            { product: { id: 10, priceInEUR: 200000 }, quantity: 1, priceAtPurchase: 999 },
+          ],
+        },
+      }
+      payload.find.mockResolvedValue({ docs: [tx] })
+      payload.create.mockResolvedValueOnce({ id: 400 })
+      payload.update.mockResolvedValue({})
+
+      await bundled.confirmOrder({
+        data: { transId: 'MOCK-42-1234567890' },
+        ordersSlug: 'orders',
+        req: createMockReq(payload),
+        transactionsSlug: 'transactions',
+        cartsSlug: 'carts',
+      } as never)
+
+      expect(payload.create.mock.calls[0][0].data.items[0]).toMatchObject({
+        product: 10,
+        quantity: 1,
+        priceAtPurchase: 999,
+        originalPrice: 1500,
+        bundleAssignmentKey: 'bundle-1',
+      })
+    })
+
+    it('writes what enrichOrderData returns', async () => {
+      const enriched = comgateAdapter({
+        merchantId: MOCK_MERCHANT_ID,
+        secret: MOCK_SECRET,
+        enrichOrderData: (data, ctx) => ({
+          ...data,
+          tenant: ctx.transaction.tenant,
+          transactions: [ctx.transaction.id],
+        }),
+      })
+      const tx = {
+        id: 42,
+        tenant: 5,
+        amount: 2000,
+        currency: 'EUR',
+        customerEmail: 'test@example.com',
+        comgate: { transId: 'MOCK-42-1234567890' },
+        cart: { id: 1, items: [] },
+      }
+      payload.find.mockResolvedValue({ docs: [tx] })
+      payload.create.mockResolvedValueOnce({ id: 401 })
+      payload.update.mockResolvedValue({})
+
+      await enriched.confirmOrder({
+        data: { transId: 'MOCK-42-1234567890' },
+        ordersSlug: 'orders',
+        req: createMockReq(payload),
+        transactionsSlug: 'transactions',
+        cartsSlug: 'carts',
+      } as never)
+
+      const orderData = payload.create.mock.calls[0][0].data
+      expect(orderData.tenant).toBe(5)
+      expect(orderData.transactions).toEqual([42])
+      expect(orderData.status).toBe('processing')
+    })
+
+    it('leaves the payload untouched when no injection point is configured', async () => {
+      const tx = {
+        id: 42,
+        tenant: 5,
+        amount: 2000,
+        currency: 'EUR',
+        customerEmail: 'test@example.com',
+        comgate: { transId: 'MOCK-42-1234567890' },
+        cart: { id: 1, items: [] },
+      }
+      payload.find.mockResolvedValue({ docs: [tx] })
+      payload.create.mockResolvedValueOnce({ id: 402 })
+      payload.update.mockResolvedValue({})
+
+      await adapter.confirmOrder({
+        data: { transId: 'MOCK-42-1234567890' },
+        ordersSlug: 'orders',
+        req: createMockReq(payload),
+        transactionsSlug: 'transactions',
+        cartsSlug: 'carts',
+      } as never)
+
+      // Tenant pinning and the payment back-link are host concerns — the
+      // generic adapter must not invent them.
+      const orderData = payload.create.mock.calls[0][0].data
+      expect('tenant' in orderData).toBe(false)
+      expect('transactions' in orderData).toBe(false)
     })
   })
 

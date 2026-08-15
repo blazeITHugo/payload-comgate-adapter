@@ -1,9 +1,18 @@
 import type { PaymentAdapter } from '@payloadcms/plugin-ecommerce/types'
 import type { Field, GroupField, JsonObject } from 'payload'
-import type { ComgateAdapterArgs, ComgateCurrency, ComgatePaymentRequest } from './types'
+import type {
+  ComgateAdapterArgs,
+  ComgateCartContext,
+  ComgateCartLike,
+  ComgateCurrency,
+  ComgateItemPricing,
+  ComgateOrderContext,
+  ComgatePaymentRequest,
+} from './types'
 import {
   PaymentError,
   asTransactionDoc,
+  buildCustomerDetails,
   createPayment,
   getPaymentStatus,
   isMockMode,
@@ -17,8 +26,12 @@ import {
 import {
   resolveCustomerId,
   withPaymentLock,
-  resolveOrderItemPrice,
+  resolveOrderItemPricing,
   calcSubscriptionDiscountCents,
+  assertExpectedCurrency,
+  asTransactionCollection,
+  asOrderId,
+  extractRelationId,
   type PricingContext,
 } from 'payload-payment-shared'
 
@@ -43,6 +56,27 @@ function orderHasSubscriptions(order: unknown): boolean {
     (s): s is SubscriptionAssignmentLike =>
       !!s && typeof s === 'object' && typeof (s as { assignmentKey?: unknown }).assignmentKey === 'string',
   )
+}
+
+/**
+ * Comgate's wire codes for the wallet buttons are `APPLEPAY_REDIRECT` /
+ * `GOOGLEPAY_REDIRECT` (apidoc.comgate.cz → "Payment gateway methods"). The
+ * bare `APPLEPAY` / `GOOGLEPAY` is not a method code at all — `create` answers
+ * `Error [1109] - Invalid payment method [APPLEPAY]` and the payer hits a dead
+ * end with an abandoned cart.
+ *
+ * Normalised here rather than at the caller, because a store that has been
+ * sending the legacy value should not have to change to keep working.
+ */
+const METHOD_ALIASES: Record<string, string> = {
+  APPLEPAY: 'APPLEPAY_REDIRECT',
+  GOOGLEPAY: 'GOOGLEPAY_REDIRECT',
+}
+
+const normalizeMethod = (value: string | undefined): string | undefined => {
+  if (!value) return value
+  const upper = value.toUpperCase()
+  return METHOD_ALIASES[upper] ?? value
 }
 
 type HeaderReadable = { headers?: { get?: (key: string) => string | null } }
@@ -123,9 +157,15 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
     preauth = false,
     method = 'ALL',
     label = 'Comgate',
+    category = 'PHYSICAL_GOODS_ONLY',
     serverUrl,
     isReturnHostAllowed,
     groupOverrides,
+    validateCart,
+    resolveDiscountCents,
+    enrichTransactionData,
+    resolveItemPricing,
+    enrichOrderData,
   } = config
 
   /**
@@ -158,21 +198,26 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
     // Allow per-payment country override (e.g. 'CZ' for Czech locale)
     const paymentCountry = (data as Record<string, unknown>).country as string | undefined || country
     const paymentLang = (data as Record<string, unknown>).lang as string | undefined || lang
-    const comgateMethod = (data as Record<string, unknown>).comgateMethod as string | undefined
-    const cart = data.cart as
-      | {
-          id: string | number
-          subtotal: number
-          pricingContext?: PricingContext
-          items: unknown[]
-        }
-      | undefined
+    const comgateMethod = normalizeMethod(
+      (data as Record<string, unknown>).comgateMethod as string | undefined,
+    )
+    const cart = data.cart as ComgateCartLike | undefined
     const customerEmail =
       data.customerEmail || (req.user?.collection === 'users' ? req.user.email : undefined)
 
     if (!currency) {
       throw new PaymentError('Currency is required.')
     }
+
+    // The plugin resolves `currency` from cart.currency — refuse to charge a
+    // cart whose currency differs from what the storefront displayed (a stale
+    // cart left over from another storefront). Skipped when the checkout
+    // client doesn't send `expectedCurrency`.
+    assertExpectedCurrency({
+      expected: (data as Record<string, unknown>).expectedCurrency,
+      actual: currency,
+      logPrefix: '[Comgate]',
+    })
 
     if (!customerEmail) {
       throw new PaymentError('Customer email is required.')
@@ -245,7 +290,27 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
 
     // Use explicit pricing data if provided (preferred), otherwise calculate from cart
     const subtotalCents = cart.subtotal // CENTS from ecommerce plugin
-    const promoDiscountCents = discount?.calculatedAmount || 0 // CENTS (promo code)
+
+    // Everything a host's injection points need, resolved once.
+    const cartContext: ComgateCartContext = {
+      req,
+      data: additionalData,
+      cart,
+      customerId,
+      currency: currency.toUpperCase(),
+      subtotalCents,
+      pricingContext,
+    }
+
+    // Host gate — e.g. a B2B minimum order value. Throws to refuse the payment.
+    await validateCart?.(cartContext)
+
+    // CENTS (promo code). The claim is client-supplied; a host that owns the
+    // promo codes re-reads the row here and returns what it is really worth.
+    const claimedDiscountCents = discount?.calculatedAmount || 0
+    const promoDiscountCents = resolveDiscountCents
+      ? await resolveDiscountCents({ ...cartContext, claimedDiscountCents })
+      : claimedDiscountCents
     // Total monetary discount = promo + Subscribe & Save. The subscription part
     // is recomputed server-side from the cart snapshot (never trusted from the
     // client) so a subscribed line is actually charged its discounted price.
@@ -275,43 +340,48 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
     let transaction: { id: string | number } | undefined
 
     try {
-      // Create transaction record with complete pricing breakdown
-      // Pass req so assignTenantFromCurrency hook can read x-tenant-id header
+      const transactionData: Record<string, unknown> = {
+        paymentMethod: 'comgate' as const,
+        status: 'pending' as const,
+        amount: grandTotalInCurrency,
+        currency: currency.toUpperCase() as ComgateCurrency,
+        cart: typeof cart.id === 'number' ? cart.id : undefined,
+        ...(customerId != null ? { customer: customerId } : {}),
+        customerEmail,
+        pricingContext,
+        // Pricing breakdown
+        subtotal: subtotalInCurrency,
+        subtotalBeforeDiscount: subtotalInCurrency,
+        discountAmount: discountInCurrency,
+        shippingCost: shippingCostValue,
+        grandTotal: grandTotalInCurrency,
+        freeShipping: pricingData?.freeShipping ?? shippingCostValue === 0,
+        // Discount details
+        ...(additionalData.discount ? { discount: additionalData.discount } : {}),
+        // Shipping method details
+        ...(additionalData.shippingMethod
+          ? { shippingMethod: additionalData.shippingMethod }
+          : {}),
+        // Addresses
+        ...(additionalData.shippingAddress
+          ? { shippingAddress: additionalData.shippingAddress }
+          : {}),
+        ...(additionalData.billingAddress
+          ? { billingAddress: additionalData.billingAddress }
+          : {}),
+        // OSS data (passed through to order on confirm)
+        ...(additionalData.ossData ? { ossData: additionalData.ossData } : {}),
+      }
+
+      // Create transaction record with complete pricing breakdown.
+      // `req` is threaded so a host's tenant-assignment hooks can read the
+      // request headers.
       transaction = await payload.create({
-        collection: transactionsSlug as 'transactions',
+        collection: asTransactionCollection(transactionsSlug),
         req,
-        data: {
-          paymentMethod: 'comgate' as const,
-          status: 'pending' as const,
-          amount: grandTotalInCurrency,
-          currency: currency.toUpperCase() as ComgateCurrency,
-          cart: typeof cart.id === 'number' ? cart.id : undefined,
-          ...(customerId != null ? { customer: customerId } : {}),
-          customerEmail,
-          pricingContext,
-          // Pricing breakdown
-          subtotal: subtotalInCurrency,
-          subtotalBeforeDiscount: subtotalInCurrency,
-          discountAmount: discountInCurrency,
-          shippingCost: shippingCostValue,
-          grandTotal: grandTotalInCurrency,
-          freeShipping: pricingData?.freeShipping ?? shippingCostValue === 0,
-          // Discount details
-          ...(additionalData.discount ? { discount: additionalData.discount } : {}),
-          // Shipping method details
-          ...(additionalData.shippingMethod
-            ? { shippingMethod: additionalData.shippingMethod }
-            : {}),
-          // Addresses
-          ...(additionalData.shippingAddress
-            ? { shippingAddress: additionalData.shippingAddress }
-            : {}),
-          ...(additionalData.billingAddress
-            ? { billingAddress: additionalData.billingAddress }
-            : {}),
-          // OSS data (passed through to order on confirm)
-          ...(additionalData.ossData ? { ossData: additionalData.ossData } : {}),
-        },
+        data: (enrichTransactionData
+          ? await enrichTransactionData(transactionData, cartContext)
+          : transactionData) as JsonObject,
       })
 
       const refId = String(transaction.id)
@@ -330,6 +400,11 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
           ? originForHost(derivedHost, req)
           : getServerUrl()
       const returnUrl = `${returnBase}/checkout/confirm-order`
+      // Cancelled / failed payments go straight to the cancel page instead of
+      // bouncing through confirm-order (which would have to fail a confirm
+      // call first). No query string: Comgate appends `?id=…&refId=…` to the
+      // return URL, and the cancel page already defaults to "cancelled".
+      const cancelUrl = `${returnBase}/checkout/cancel`
       const price = cartTotalCents // Already in cents
 
       let transId: string
@@ -359,13 +434,41 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
           lang: paymentLang,
           preauth,
           returnUrl,
+          cancelUrl,
+          // Customer / order detail for Comgate's 3DS2 payload + portal
+          // record. Built defensively — a missing or malformed value is
+          // dropped, never a reason for `create` to fail.
+          ...buildCustomerDetails({
+            billingAddress: additionalData.billingAddress,
+            shippingAddress: additionalData.shippingAddress,
+            shippingMethod: additionalData.shippingMethod,
+            productName: additionalData.productName,
+            category,
+          }),
           // First-payment of a subscription order: ask Comgate to enrol the
           // card so the cron-driven recurring charges can re-bill via the
           // returned `payerAcc` token. Plain one-off orders skip this flag.
           ...(hasSubscriptions ? { initRecurring: 'Y' as const } : {}),
         }
 
-        const response = await createPayment(payMerchantId, paySecret, request)
+        // A method the eshop connection doesn't have activated is rejected with
+        // Comgate code 1109. Retry once with the configured default (`ALL`) so
+        // the payer still reaches the gateway — Comgate's own page offers the
+        // wallet when it is available — instead of a dead-ended checkout.
+        const response = await createPayment(payMerchantId, paySecret, request).catch(
+          (error: unknown) => {
+            const rejectedMethod =
+              error instanceof PaymentError && error.details?.comgateCode === 1109
+            if (!rejectedMethod || request.method === method) throw error
+            payload.logger.warn({
+              msg: '[Comgate] method rejected by the gateway — retrying with the default method',
+              rejected: request.method,
+              fallback: method,
+              refId,
+            })
+            return createPayment(payMerchantId, paySecret, { ...request, method })
+          },
+        )
 
         if (!response.transId || !response.redirect) {
           throw new PaymentError('Comgate returned success but missing transId or redirect URL')
@@ -379,7 +482,7 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
       // Payload transaction atomicity.
       await payload.update({
         id: transaction.id,
-        collection: transactionsSlug as 'transactions',
+        collection: asTransactionCollection(transactionsSlug),
         req,
         data: {
           comgate: { transId },
@@ -390,6 +493,7 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
         message: 'Payment initiated successfully',
         redirect,
         transactionID: transaction.id,
+        gatewayTransactionId: transId,
       }
     } catch (error) {
       payload.logger.error(error, 'Error initiating payment with Comgate')
@@ -400,7 +504,7 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
       if (transaction?.id) {
         await payload
           .update({
-            collection: transactionsSlug as 'transactions',
+            collection: asTransactionCollection(transactionsSlug),
             id: transaction.id,
             req,
             overrideAccess: true,
@@ -457,7 +561,7 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
       // case.
       // overrideAccess: confirmOrder runs from webhook/callback without user session
       const initialResults = await payload.find({
-        collection: transactionsSlug as 'transactions',
+        collection: asTransactionCollection(transactionsSlug),
         overrideAccess: true,
         where: {
           'comgate.transId': { equals: transId },
@@ -472,10 +576,7 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
 
       const initialTx = asTransactionDoc<ComgateTransaction>(initialResults.docs[0])
       if (initialTx.order) {
-        const existingOrderId =
-          typeof initialTx.order === 'object' && initialTx.order !== null
-            ? (initialTx.order as { id: number }).id
-            : (initialTx.order as number)
+        const existingOrderId = asOrderId(initialTx.order)
         return {
           message: 'Order already confirmed',
           orderID: existingOrderId,
@@ -487,11 +588,7 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
       // Resolve tenant scope for the lock key from the transaction we just
       // fetched (transaction always has tenant by the time confirmOrder
       // runs — set during initiatePayment).
-      const initialTenantRaw = (initialTx as { tenant?: unknown }).tenant
-      const initialTenantId =
-        typeof initialTenantRaw === 'object' && initialTenantRaw !== null
-          ? (initialTenantRaw as { id: number | string }).id
-          : (initialTenantRaw as number | string | undefined)
+      const initialTenantId = extractRelationId((initialTx as { tenant?: unknown }).tenant)
       const lockKey = `${transId}:comgate:${initialTenantId ?? 'no-tenant'}`
 
       return await withPaymentLock(payload, req, lockKey, async (req) => {
@@ -518,10 +615,7 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
         // Serialised idempotent short-circuit — if the other lock-waiter
         // already wrote the order, return it now.
         if (transaction.order) {
-          const existingOrderId =
-            typeof transaction.order === 'object' && transaction.order !== null
-              ? (transaction.order as { id: number }).id
-              : (transaction.order as number)
+          const existingOrderId = asOrderId(transaction.order)
           return {
             message: 'Order already confirmed',
             orderID: existingOrderId,
@@ -591,8 +685,11 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
 
         // Extract order items from cart — unit price re-derived via the shared
         // resolver so b2c (retail, honours salePrice) and b2b (wholesale tier)
-        // stay consistent across every adapter.
+        // stay consistent across every adapter. A host whose cart carries
+        // server-written prices the catalog cannot reproduce supplies its own
+        // `resolveItemPricing`.
         const orderPricingContext: PricingContext = transaction.pricingContext || 'b2c'
+        const orderCurrency = transaction.currency || 'EUR'
 
         const orderItems = (transaction.cart?.items?.map((item) => {
           const product =
@@ -604,30 +701,33 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
               ? (item.variant as Record<string, unknown>)
               : null
           const source = variant || product
-          const price = resolveOrderItemPrice(
-            source,
-            transaction.currency || 'EUR',
-            orderPricingContext,
-          )
+          const pricing: ComgateItemPricing = resolveItemPricing
+            ? resolveItemPricing({
+                item: item as unknown as Record<string, unknown>,
+                source,
+                currency: orderCurrency,
+                pricingContext: orderPricingContext,
+                transaction: transaction as Record<string, unknown>,
+              })
+            : resolveOrderItemPricing(source, orderCurrency, orderPricingContext)
 
           return {
             product: product ? (product.id as number) : item.product,
             variant: variant ? (variant.id as number) : item.variant,
             quantity: item.quantity,
-            priceAtPurchase: price / 100, // cents → decimal
+            priceAtPurchase: pricing.price / 100, // cents → decimal
+            ...(pricing.originalPrice != null
+              ? { originalPrice: pricing.originalPrice / 100 }
+              : {}),
+            ...(pricing.extraFields ?? {}),
           }
-        }) || []) as Array<{ product?: number | null; variant?: number | null; quantity: number; priceAtPurchase: number }>
+        }) || []) as Array<Record<string, unknown>>
 
         // Create order — always use the customer stored on the transaction
         // during initiatePayment. Do NOT fall back to `req.user?.id` — see
         // CorvusPay adapter for the shared-computer / stale-cookie
         // scenario that motivated this.
-        const storedCustomerId =
-          typeof transaction.customer === 'object' && transaction.customer !== null
-            ? (transaction.customer as { id: number }).id
-            : typeof transaction.customer === 'number'
-              ? transaction.customer
-              : undefined
+        const storedCustomerId = extractRelationId(transaction.customer)
         const transactionData = transaction as Record<string, unknown>
 
         // Extract OSS data if present (from additionalData passed during initiatePayment)
@@ -635,7 +735,7 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
           | { deliveryCountry?: string; vatRate?: number; vatAmount?: number; isOss?: boolean }
           | undefined
 
-        const orderData = {
+        const orderData: Record<string, unknown> = {
           customer: storedCustomerId || undefined,
           customerEmail: transaction.customerEmail,
           items: orderItems,
@@ -674,6 +774,19 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
             : {}),
         }
 
+        // Last chance for the host to shape the create payload — pinning a
+        // tenant, carrying cart-level groups across, copying consents off the
+        // transaction. Default is the payload built above, unchanged.
+        const orderContext: ComgateOrderContext = {
+          req,
+          transaction: transactionData,
+          currency: orderCurrency,
+          pricingContext: orderPricingContext,
+        }
+        const finalOrderData = enrichOrderData
+          ? await enrichOrderData(orderData, orderContext)
+          : orderData
+
         const order = await payload.create({
           collection: ordersSlug as 'orders',
           overrideAccess: true,
@@ -685,7 +798,7 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
           // when collection types aren't registered), and lets us drop the
           // `as any` escape hatch without losing call-site type checking
           // for everything else inside `payload.create`.
-          data: orderData as JsonObject,
+          data: finalOrderData as JsonObject,
         })
 
         // Mark cart as purchased AND detach it from the customer in the SAME
@@ -715,11 +828,7 @@ export const comgateAdapter = (config: ComgateAdapterArgs): PaymentAdapter => {
         // Note: the previous `comgate.confirming = true` flag-then-recheck
         // pattern is removed here — `withPaymentLock` provides true
         // serialisation, so the flag is no longer load-bearing.
-        const transactionTenantRaw = (transaction as { tenant?: unknown }).tenant
-        const transactionTenantId =
-          typeof transactionTenantRaw === 'object' && transactionTenantRaw !== null
-            ? (transactionTenantRaw as { id: number | string }).id
-            : (transactionTenantRaw as number | string | undefined)
+        const transactionTenantId = extractRelationId((transaction as { tenant?: unknown }).tenant)
 
         // Idempotency: never clobber an already-stored `payerAcc`. The cron
         // billing job at /api/cron/billing keys recurring charges off this

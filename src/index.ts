@@ -11,8 +11,16 @@ export { comgateAdapter } from './comgateAdapter'
 export type {
   ComgateAdapterArgs,
   ComgateAdapterClientArgs,
+  ComgateCartContext,
+  ComgateCartLike,
+  ComgateCategory,
   ComgateCurrency,
+  ComgateCustomerDetails,
+  ComgateDelivery,
+  ComgateItemPricing,
+  ComgateItemPricingResolver,
   ComgateLanguage,
+  ComgateOrderContext,
   ComgateCreateResponse,
   ComgateStatusResponse,
   ComgateWebhookPayload,
@@ -35,9 +43,12 @@ export type { RefundResult, RefundConfig } from './refund'
 export {
   PaymentError,
   COMGATE_API_URL,
+  buildCustomerDetails,
   createAuthHeader,
   createPayment,
+  getAppleDomainAssociation,
   getPaymentStatus,
   isMockMode,
   isMockTransactionId,
 } from './utils'
+export type { BuildCustomerDetailsArgs } from './utils'

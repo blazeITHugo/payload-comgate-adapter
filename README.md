@@ -9,7 +9,7 @@ Comgate payment gateway adapter for the [PayloadCMS](https://payloadcms.com/) ec
 
 ## Current version
 
-`0.4.0` (per `package.json`).
+`0.5.0` (per `package.json`). See [CHANGELOG.md](./CHANGELOG.md).
 
 ## Installation
 
@@ -23,11 +23,11 @@ pnpm add payload-comgate-adapter
 {
   "@payloadcms/plugin-ecommerce": "^3.81.0",
   "payload": "^3.81.0",
-  "payload-payment-shared": "^0.1.0"
+  "payload-payment-shared": "^0.2.0"
 }
 ```
 
-`payload-payment-shared` (commit `0cd6307e`) is a hard peer — see [Shared payment runtime](#shared-payment-runtime).
+`payload-payment-shared` is a hard peer — see [Shared payment runtime](#shared-payment-runtime).
 
 ## Shared payment runtime
 
@@ -109,11 +109,17 @@ COMGATE_SECRET=your-comgate-api-secret
 | `country`    | `string`          | `'CZ'`       | ISO 3166-1 alpha-2 default country. Can be overridden per payment via `data.country`.                                                                                  |
 | `lang`       | `ComgateLanguage` | `'cs'`       | Default checkout language. Can be overridden per payment via `data.lang`. See [Supported languages](#supported-languages).                                             |
 | `preauth`    | `boolean`         | `false`      | If true, payments are authorised but not captured.                                                                                                                     |
-| `method`     | `string`          | `'ALL'`      | Payment method filter. Per-payment override via `data.comgateMethod`.                                                                                                  |
+| `method`     | `string`          | `'ALL'`      | Payment method filter. Per-payment override via `data.comgateMethod`. Bare `APPLEPAY` / `GOOGLEPAY` are normalised to their `_REDIRECT` wire codes — see [Wallet methods](#wallet-methods). |
 | `label`      | `string`          | `'Comgate'`  | Admin label for the payment method.                                                                                                                                    |
+| `category`   | `ComgateCategory` | `'PHYSICAL_GOODS_ONLY'` | Order-content category sent with every payment as part of the 3DS2 payload. Use `'OTHER'` for a catalogue that is not purely physical goods.                 |
 | `serverUrl`  | `string`          | env / `localhost:3000` | **Fallback origin** for the `/checkout/confirm-order` return URL — used when the request host is missing or fails `isReturnHostAllowed`. Falls back to `process.env.NEXT_PUBLIC_SERVER_URL` then `localhost:3000`. The live return URL prefers the validated request host. |
 | `isReturnHostAllowed` | `(host: string) => boolean` | — | Validates the request host before it is trusted as the return-URL origin (open-redirect guard). **Multi-domain deployments MUST supply it** — without it every request falls back to `serverUrl`, so a per-tenant return host is never honoured. voxberg wires `(host) => matchTenantByDomain(host) !== null`. |
 | `groupOverrides` | `{ fields?, admin? }` | —     | Override the `comgate` group on the `transactions` collection.                                                                                                         |
+| `validateCart` | `(ctx) => void \| Promise<void>` | — | Injection point — see [Injection points](#injection-points).                                                                             |
+| `resolveDiscountCents` | `(ctx) => number \| Promise<number>` | — | Injection point — server-side authority on the promo discount.                                                              |
+| `enrichTransactionData` | `(data, ctx) => data` | —  | Injection point — final say over the `transactions` create payload.                                                                       |
+| `resolveItemPricing` | `(input) => ComgateItemPricing` | — | Injection point — per-line pricing at `confirmOrder`.                                                                           |
+| `enrichOrderData` | `(data, ctx) => data` | —      | Injection point — final say over the `orders` create payload.                                                                                  |
 
 ### `comgateAdapterClient(config)`
 
@@ -154,9 +160,75 @@ COMGATE_SECRET=your-comgate-api-secret
 5. Live mode → calls `getPaymentStatus(merchantId, secret, transId)`. Refuses anything other than `PAID`. Verifies amount (cents) and currency match the persisted transaction; either mismatch throws `PaymentError`.
 6. Builds order items with currency-specific prices (`priceInEUR`, `salePriceIn{currency}` etc.), creates the order with `overrideAccess: true` (webhooks have no user/tenant session), passes through OSS VAT data when present, marks the cart `purchasedAt`, and updates the transaction with `status: 'succeeded'` plus `comgate.{status, fee, payerName, payerAcc, confirming: false}`.
 
+### Customer detail sent to the gateway (3DS2 / portal)
+
+Beyond the required params, `initiatePayment` maps the checkout payload onto Comgate's optional
+detail fields — `fullName`, `phone`, `billingAddr{City,Street,PostalCode,Country}`, `delivery`,
+`homeDelivery{City,Street,PostalCode,Country}`, `category`, `name`. Comgate forwards these into the
+issuer's 3DS2 authentication request, so populating them raises the odds of a **frictionless** flow
+instead of a challenge (every challenge is a drop-off risk); they also fill in the payment detail in
+the Comgate portal, which is what support and dispute handling read.
+
+The mapping lives in `buildCustomerDetails` (exported for testing) and is **total**: values are
+trimmed, truncated and validated (`country` must be ISO alpha-2, `phone` must already be E.164), and
+anything missing or malformed is simply omitted. A bad address can never be the reason a payment
+fails to initiate.
+
+Sources, all off the plugin's `data`:
+
+| Comgate param | Source |
+| --- | --- |
+| `fullName`, `phone` | `billingAddress`, falling back to `shippingAddress` |
+| `billingAddr*` | `billingAddress` (`addressLine1` + `addressLine2` joined) |
+| `delivery` | `PICKUP` when `shippingMethod.pickupPointId` is set, else `HOME_DELIVERY` |
+| `homeDelivery*` | `shippingAddress` — only when `delivery === 'HOME_DELIVERY'` |
+| `name` | `data.productName` (you decide what to show as "Produkt") |
+| `category` | adapter config, defaults to `PHYSICAL_GOODS_ONLY` |
+
+### Return URLs
+
+`url` / `url_paid` / `url_pending` point at `/checkout/confirm-order` on the validated request host;
+`url_cancelled` points at `/checkout/cancel`, so a cancelled payment no longer has to fail a confirm
+call before the payer sees the cancel page. No query string is attached — Comgate appends its own
+`?id=…&refId=…`.
+
+### Wallet methods
+
+Comgate's wire codes for the wallet buttons are `APPLEPAY_REDIRECT` / `GOOGLEPAY_REDIRECT`. The bare
+`APPLEPAY` / `GOOGLEPAY` is not a method code at all: `create` answers
+`Error [1109] - Invalid payment method [APPLEPAY]` and the payer hits a dead end. The adapter
+normalises the legacy values, so a store already sending them keeps working.
+
+A method the eshop connection has **not activated** is rejected with the same code 1109. Rather than
+dead-ending the checkout, the adapter retries once with the configured default `method` — Comgate's
+own page offers the wallet when it is available.
+
+### Apple Pay domain association
+
+An in-page wallet sheet (Checkout SDK, no redirect) requires Apple to verify your domain, which means
+serving Comgate's file verbatim from
+`https://<domain>/.well-known/apple-developer-merchantid-domain-association`. Comgate mints it per
+eshop connection and **rotates its content**, so fetch it on demand instead of committing a copy:
+
+```typescript
+import { getAppleDomainAssociation } from 'payload-comgate-adapter'
+
+export async function GET() {
+  const file = await getAppleDomainAssociation(
+    process.env.COMGATE_MERCHANT_ID!,
+    process.env.COMGATE_SECRET!,
+  )
+  return new Response(file, { headers: { 'Content-Type': 'text/plain' } })
+}
+```
+
+Cache the result and keep a fallback — Apple rejects the file if it carries a trailing newline, which
+the helper already trims.
+
 ### Failure / refund
 
 - All errors throw `PaymentError`. Network/API errors are wrapped with `cause` so the underlying reason is preserved.
+- `createPayment` rejections carry `code: 'COMGATE_CREATE_REJECTED'` and `details.comgateCode`, so callers can branch on the gateway's numeric code.
 - Refunds use `POST /v1.0/refund` (commit `0.3.0` change — was previously a stub returning fake success). See [Refunds](#refunds).
 
 ### Per-payment overrides
@@ -166,8 +238,80 @@ The plugin's `data` object can carry:
 - `data.country` — overrides the adapter's default `country` (e.g. forwarding `'CZ'` while the global default is `'SK'`).
 - `data.lang` — overrides `lang`.
 - `data.comgateMethod` — overrides the `method` filter.
+- `data.productName` — the "Produkt" label on the Comgate payment record.
+- `data.expectedCurrency` — the currency the storefront displayed. When it disagrees with the cart's
+  currency the payment is refused with `CART_CURRENCY_MISMATCH` rather than charged in the wrong
+  currency. Omit it and the guard is skipped.
 
-Used in the voxberg checkout to flip CZ shoppers to `cs` + `CZK` without reconfiguring the adapter.
+Used in a multi-locale checkout to flip CZ shoppers to `cs` + `CZK` without reconfiguring the adapter.
+
+## Injection points
+
+The adapter is deliberately generic: it knows nothing about tenants, promo codes, bundles or consent
+fields. The five optional callbacks below are where a host plugs its own rules into the two moments
+that matter — before the charge, and when the order is written. All default to no-ops, so leaving
+them unset keeps the adapter behaving exactly as it did in 0.4.0.
+
+| Hook | When | Use it for |
+| --- | --- | --- |
+| `validateCart(ctx)` | after the adapter's currency / email / cart checks, before any write | minimum order value, credit blocks — throw to refuse |
+| `resolveDiscountCents(ctx)` | while computing the charge | re-reading the promo code server-side; return `0` to drop an unverifiable claim |
+| `enrichTransactionData(data, ctx)` | just before `payload.create` on `transactions` | tenant relations, consent stamps, the checkout note |
+| `resolveItemPricing(input)` | per cart line in `confirmOrder` | carts holding server-written prices (bundle apportionment, contract prices) |
+| `enrichOrderData(data, ctx)` | just before `payload.create` on `orders` | tenant pinning, cart-level groups, consents carried off the transaction |
+
+`ctx` on the `initiatePayment` hooks (`ComgateCartContext`) carries `req`, the plugin `data`, the
+`cart`, the resolved `customerId`, the upper-cased `currency`, `subtotalCents` and `pricingContext`.
+`resolveDiscountCents` additionally gets `claimedDiscountCents` — the client's claim, which is what
+you are being asked to verify. `ctx` on `enrichOrderData` (`ComgateOrderContext`) carries `req`, the
+depth-2 `transaction`, `currency` and `pricingContext`.
+
+The `enrich*` hooks receive the payload the adapter built and return the one to write, so the
+convention is to spread:
+
+```typescript
+comgateAdapter({
+  merchantId: process.env.COMGATE_MERCHANT_ID!,
+  secret: process.env.COMGATE_SECRET!,
+
+  // Refuse below the B2B floor before a transaction row exists.
+  validateCart: async ({ req, customerId, subtotalCents, currency }) => {
+    await assertMinOrderValue({ req, customerId, subtotalCents, currency })
+  },
+
+  // Never charge the client's claimed discount — re-read the code.
+  resolveDiscountCents: ({ req, data, subtotalCents, currency }) =>
+    revalidatePromoDiscountCents({ req, claim: data.discount, subtotalCents, currency }),
+
+  // Multi-tenant: pin the tenant and link the payment back onto the order.
+  enrichOrderData: (data, { transaction }) => ({
+    ...data,
+    ...(transaction.tenant ? { tenant: extractRelationId(transaction.tenant) } : {}),
+    transactions: [transaction.id],
+    ...consentsFromTransaction(transaction),
+  }),
+})
+```
+
+`resolveItemPricing` returns MINOR units — `{ price, originalPrice }` like the shared
+`resolveOrderItemPricing`, plus an optional `extraFields` object merged onto the order item for
+host-specific columns:
+
+```typescript
+resolveItemPricing: ({ item, source, currency, pricingContext }) => {
+  const bundleKey = item.bundleAssignmentKey as string | undefined
+  // A bundle line already carries its apportioned share on the cart — do not
+  // re-derive it from the catalog.
+  if (bundleKey) {
+    return {
+      price: Math.round((item.priceAtPurchase as number) * 100),
+      originalPrice: null,
+      extraFields: { bundleAssignmentKey: bundleKey },
+    }
+  }
+  return resolveOrderItemPricing(source, currency, pricingContext)
+}
+```
 
 ## Refunds
 
@@ -241,8 +385,16 @@ import { refundPayment } from 'payload-comgate-adapter/refund'
 import type {
   ComgateAdapterArgs,
   ComgateAdapterClientArgs,
+  ComgateCartContext,
+  ComgateCartLike,
+  ComgateCategory,
   ComgateCurrency,
+  ComgateCustomerDetails,
+  ComgateDelivery,
+  ComgateItemPricing,
+  ComgateItemPricingResolver,
   ComgateLanguage,
+  ComgateOrderContext,
   ComgateCreateResponse,
   ComgateStatusResponse,
   ComgateWebhookPayload,
@@ -253,12 +405,15 @@ import type {
 import type { RefundResult, RefundConfig } from 'payload-comgate-adapter/refund'
 ```
 
-Plus the re-exported utilities: `PaymentError`, `COMGATE_API_URL`, `createAuthHeader`, `createPayment`, `getPaymentStatus`, `isMockMode`, `isMockTransactionId`.
+Plus the re-exported utilities: `PaymentError`, `COMGATE_API_URL`, `buildCustomerDetails`, `createAuthHeader`, `createPayment`, `getAppleDomainAssociation`, `getPaymentStatus`, `isMockMode`, `isMockTransactionId`.
 
 ## Recent changes
 
+Full history in [CHANGELOG.md](./CHANGELOG.md).
+
 | Commit     | Change                                                                                                            |
 | ---------- | ----------------------------------------------------------------------------------------------------------------- |
+| `0.5.0`    | 3DS2 / portal customer detail (+ `category`), `url_paid`/`url_pending`/`url_cancelled` split, Apple Pay domain association, wallet method aliases + error-1109 retry, `gatewayTransactionId`, cart-currency guard, and five optional injection points for host-specific rules. Peer bumped to `payload-payment-shared@^0.2.0`. |
 | `63b8d0ba` | P0 — switch to shared `PaymentError`, P1 thread `req` everywhere, drop body-secret on refund, drop `req.user` fallback. |
 | `04cc11a1` | Widen `ComgateLanguage` + `ComgateCurrency` types in vendored adapter.                                           |
 | `14d9324f` | Apple Pay / Google Pay wallet button support for Comgate markets.                                                 |

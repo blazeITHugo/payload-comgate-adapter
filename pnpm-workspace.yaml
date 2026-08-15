@@ -1,0 +1,14 @@
+allowBuilds:
+  esbuild: true
+
+# `payload-payment-shared@0.2.0` is not on the registry yet, so the local build
+# and test run resolve it from the sibling checkout. This file is dev-only —
+# `files` in package.json ships `dist` alone, and the published manifest keeps
+# the real `^0.2.0` semver range. Drop the override once 0.2.0 is on npm.
+#
+# `file:` (not `link:`) on purpose: it installs the sibling as a real package so
+# its `payload` PEER resolves to this repo's copy. A symlink would keep the
+# sibling's own payload install, and tsc then compares two structurally
+# identical `BasePayload` types and dies with "excessive stack depth".
+overrides:
+  payload-payment-shared: file:../payload-payment-shared
